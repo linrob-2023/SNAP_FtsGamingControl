@@ -1,0 +1,49 @@
+name: sdk-py-provider-alldata
+title: Handheld Controller Provider
+version: 2.2.10
+summary: reads USB inputs from handheld controller and publishes to the datalayer
+description: |
+  The controller can be connected to one of the USB ports. The LibUSB allows the inputs to be read. 
+  The input are then published to corresponding nodes on the datalayer.
+base: core22
+confinement: strict
+grade: stable
+
+apps:
+  provider:
+    command: bin/main.py
+    plugs:
+      - network
+      - datalayer
+      - raw-usb
+      - hardware-observe
+    environment:
+      #LD_LIBRARY_PATH: $SNAP/lib/x86_64-linux-gnu
+      LD_LIBRARY_PATH: $SNAP/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+    daemon: simple
+    restart-condition: always
+    passthrough:
+      restart-delay: 30s
+
+parts:
+  provider:
+    plugin: python
+    source: .
+    override-build:
+      snapcraftctl build
+
+      pip3 install pyusb
+    build-packages:
+      - libusb-1.0-0
+    stage-packages:
+      - libzmq5
+      - ctrlx-datalayer
+      - libusb-1.0-0
+    python-packages:
+      - pyusb
+
+plugs:
+  datalayer:
+    interface: content
+    content: datalayer
+    target: $SNAP_DATA/.datalayer
