@@ -47,7 +47,7 @@ class MouseData:
 
     def __init__(self, provider: Provider, client: Client,  addressRoot: str):
 
-        print("INFO: Initializing MouseData Provider Node", flush=True)
+        #print("INFO: Initializing MouseData Provider Node", flush=True)
 
         self.provider = provider
         self.client = client
@@ -188,45 +188,28 @@ class MouseData:
         #Full-path: libusb-1.0.so.0.3.0
         
         if backend is None:
-            print("LibUSB not Found", flush=True)
-
+            #print("LibUSB not Found", flush=True)
+            return
+            
+        interface = 0
+        dev = None
+        endpoint = None
+        while dev is None:
+            dev = usb.core.find(idVendor=0x046d, idProduct=0xc21f, backend=backend)
+            if not dev:
+                dev = usb.core.find(idVendor=0x046d, idProduct=0xc219, backend=backend)
+            if not dev:
+                #print("Joystick not found, retrying in 5s...", flush=True)
+                time.sleep(5)
         #print(usb.core.show_devices())
         # Find the connected usb device using the Vendor ID and the Product ID
-        dev = ''
-        while True:
-            try:
-                dev = ''
-                dev = usb.core.find(idVendor=0x046d, idProduct=0xc21f, backend=backend)
-            except usb.core.NoBackendError as e:
-                self.full_data.set_string("something wrong with libusb")
-                print("something wrong with libusb", flush=True)
-                return
-
-            if dev:
-                self.controller_connected.set_bool8(True)
-                print("wireless LogiTech F710 controller found", flush=True)
-                break
-
-            print("wireless LogiTech F710 controller not found, looking for wired controller", flush=True)
-            dev = usb.core.find(idVendor=0x046d, idProduct=0xc219, backend=backend)
-
-            if dev:
-                print("wired LogiTech F710 controller found, please change mode to XInput instead of DInput", flush=True)
-                self.controller_connected.set_bool8(True)
-
-            time.sleep(1.5)
-            print("trying again in 5s", flush=True)
-            self.full_data.set_string("wireless LogiTech F710 controller not found")
-            self.controller_connected.set_bool8(False)
-            time.sleep(5.0)       
-
-        # Get the endpoint of the device and make sure to detach the connection to the OS kernel in order to claim it for this process
-        interface = 0
         endpoint = dev[0].interfaces()[0].endpoints()[0]
         dev.reset()
         if dev.is_kernel_driver_active(interface):
             dev.detach_kernel_driver(interface)
-            usb.util.claim_interface(dev, interface)
+        usb.util.claim_interface(dev, interface)
+        self.controller_connected.set_bool8(True)
+        #print("Joystick connected!", flush=True)
 
         # Endless loop to read in the data from the usb device more than once
         while True :
@@ -234,7 +217,7 @@ class MouseData:
                 # print("start reading", flush=True)
                 data = dev.read(endpoint.bEndpointAddress,endpoint.wMaxPacketSize, 500)
                 self.full_data.set_string(str(data))
-                print(str(data), flush=True)
+                #print(str(data), flush=True)
 
                 # Decoding of the mouse data array is specific to the mouse you use
                 # To decode it yourself, just look at the data array and how the data changes if you e.g., move the mouse or press a button
@@ -298,13 +281,48 @@ class MouseData:
                 self.r_joystick_y.set_float32(float(r_joystick_y_scaled))
 
 
+
             except usb.core.USBError as e:
-                # print("no data read", flush=True)
-                self.full_data.set_string("no data read")
-                data = None
-                if e.args == ('Operation timed out',):
+
+                # Normal timeout → ignore completely (device is still connected)
+                if e.errno == 110:  # ETIMEDOUT
                     continue
 
+                # Real device disconnect detected
+                if e.errno in (19, 5):  # ENODEV, EIO
+                    # Update Data Layer state
+                    self.controller_connected.set_bool8(False)
+
+                    # Release the USB interface safely
+                    try:
+                        usb.util.release_interface(dev, interface)
+                    except:
+                        pass
+
+                    dev = None
+
+                    # Wait until the dongle is plugged in again
+                    while dev is None:
+                        dev = usb.core.find(idVendor=0x046d, idProduct=0xc21f, backend=backend)
+                        if not dev:
+                            dev = usb.core.find(idVendor=0x046d, idProduct=0xc219, backend=backend)
+                        if dev is None:
+                            time.sleep(1)
+                            
+                    endpoint = dev[0].interfaces()[0].endpoints()[0]
+                    # Detach kernel driver only if needed
+                    if dev.is_kernel_driver_active(interface):
+                        dev.detach_kernel_driver(interface)
+
+                    # Claim the interface again
+                    usb.util.claim_interface(dev, interface)
+
+                    # Update Data Layer state
+                    self.controller_connected.set_bool8(True)
+                    continue
+
+                #Any other USBError → ignore silently
+                continue
     def register_nodes(self):
         
         self.provider.register_node(
@@ -344,7 +362,7 @@ class MouseData:
         self.provider.register_node(
             self.addressRoot + "Right-Joystick-Y", self.providerNode)
 
-        print("INFO: MouseData Provider Nodes registered", flush=True)
+        #print("INFO: MouseData Provider Nodes registered", flush=True)
 
     def create_metadata(self, typeAddress: str, unit: str, description: str, allowWrite : bool):
 
