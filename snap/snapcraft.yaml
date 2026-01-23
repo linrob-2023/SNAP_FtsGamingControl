@@ -1,6 +1,6 @@
 name: sdk-py-provider-alldata
 title: Handheld Controller Provider
-version: 2.2.13
+version: 2.2.14
 summary: reads USB inputs from handheld controller and publishes to the datalayer
 description: |
   The controller can be connected to one of the USB ports. The LibUSB allows the inputs to be read. 
