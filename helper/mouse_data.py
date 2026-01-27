@@ -24,6 +24,8 @@
 
 import time
 import typing
+import threading
+from threading import Lock
 
 import flatbuffers
 from comm.datalayer import Metadata, NodeClass, AllowedOperations, Reference
@@ -39,33 +41,51 @@ import usb.core
 import usb.util
 import usb.backend.libusb1
 
+# ==========================================================
+# COOLDOWN PRINT (ONLY FOR ERRORS/WARNS)
+# ==========================================================
+_print_lock = Lock()
+
+def print_lock(msg: str):
+    with _print_lock:
+        print(msg, flush=True)
+
 type_address_string = "types/datalayer/string"
 type_address_bool8 = "types/datalayer/bool8"
 type_address_float = "types/datalayer/float32"
+
 
 class MouseData:
 
     def __init__(self, provider: Provider, client: Client,  addressRoot: str):
 
-        print("INFO: Initializing MouseData Provider Node", flush=True)
-
+        # Store Provider + Client handles (Provider exposes nodes, Client could be used if needed)
         self.provider = provider
         self.client = client
-
+        # Root path under which all variables will be registered
         self.addressRoot = addressRoot + "/"
+        # Reader thread handle (USB read loop runs here to avoid blocking Data Layer callbacks)
+        self._reader_thread = None
 
+        # -----------------------------
+        # Data Layer variables (Variants)
+        # -----------------------------
+
+        # Connection state of the USB controller
         self.controller_connected = Variant()
         self.controller_connected.set_bool8(False)
         data = self.create_metadata(type_address_bool8, "", "Controller connected", False)
         self.controller_connected_metadata = Variant()
         self.controller_connected_metadata.set_flatbuffers(data)
         
+        # Raw/full byte array as string for debugging/inspection
         self.full_data = Variant()
-        self.full_data.set_string("no data available")
+        self.full_data.set_string("No data available")
         data = self.create_metadata(type_address_string, "", "Full controller data", False)
         self.full_data_metadata = Variant()
         self.full_data_metadata.set_flatbuffers(data)
 
+        # Buttons / triggers (boolean flags)
         self.left_button = Variant()
         self.left_button.set_bool8(False)
         data = self.create_metadata(type_address_bool8, "", "Left trigger LB pressed down", False)
@@ -138,6 +158,7 @@ class MouseData:
         self.right_cross_button_metadata = Variant()
         self.right_cross_button_metadata.set_flatbuffers(data)
         
+        # Joystick axes (float values, scaled in range roughly [-1..+1])
         self.l_joystick_x = Variant()
         self.l_joystick_x.set_float32(0)
         data = self.create_metadata(type_address_float, "", "Left Joystick X: ", False)
@@ -162,7 +183,10 @@ class MouseData:
         self.r_joystick_y_metadata = Variant()
         self.r_joystick_y_metadata.set_flatbuffers(data)
 
-
+        # -----------------------------
+        # Provider node callbacks
+        # -----------------------------
+        # These callbacks handle read/metadata requests from Data Layer clients
 
         self.cbs = ProviderNodeCallbacks(
             self.__on_create,
@@ -172,13 +196,64 @@ class MouseData:
             self.__on_write,
             self.__on_metadata
         )
-
+        # One ProviderNode instance is reused for all addresses, the callbacks route by suffix
         self.providerNode = ctrlxdatalayer.provider_node.ProviderNode(self.cbs)
+    def start_reading_threaded(self):
+         #Start the USB reading loop in a dedicated daemon thread (non-blocking for Data Layer)
+        if self._reader_thread is None or not self._reader_thread.is_alive():
+            self._reader_thread = threading.Thread(target=self.start_reading, daemon=True)
+            self._reader_thread.start()
+    def _set_safe_state(self, msg: str = "disconnected"):
 
+        #Put all exposed Data Layer values into a defined safe state.
+        #This is used on startup and on USB disconnect/errors.
+
+        self.controller_connected.set_bool8(False)
+        #self.full_data.set_string(msg)
+
+        # Reset all buttons
+        self.left_button.set_bool8(False)
+        self.right_button.set_bool8(False)
+        self.left_button_bottom.set_bool8(False)
+        self.right_button_bottom.set_bool8(False)
+
+        self.a_button.set_bool8(False)
+        self.b_button.set_bool8(False)
+        self.x_button.set_bool8(False)
+        self.y_button.set_bool8(False)
+
+        self.up_cross_button.set_bool8(False)
+        self.down_cross_button.set_bool8(False)
+        self.left_cross_button.set_bool8(False)
+        self.right_cross_button.set_bool8(False)
+
+        # Reset joystick axes
+        self.l_joystick_x.set_float32(0.0)
+        self.l_joystick_y.set_float32(0.0)
+        self.r_joystick_x.set_float32(0.0)
+        self.r_joystick_y.set_float32(0.0)
+    def _cleanup_usb(self, dev, interface):
+        #Release USB interface and dispose resources safely (ignore errors).
+        try:
+            usb.util.release_interface(dev, interface)
+        except:
+            print_lock("[ERROR] Endpoint access failed")
+        try:
+            usb.util.dispose_resources(dev)
+        except:
+            print_lock("[ERROR] Resource failed")
     # Thanks to https://www.orangecoat.com/how-to/read-and-decode-data-from-your-mouse-using-this-pyusb-hack
     def start_reading(self):
 
-        self.controller_connected.set_bool8(False)
+        #####   Main USB reading loop   #####
+        #   Connect to the USB device via libusb backend
+        #   Repeatedly read reports
+        #   Decode report bytes into Data Layer variables
+        #   Handle disconnect/reconnect without blocking the Data Layer server thread
+        #####################################
+
+        # Initialize to a known safe state
+        self._set_safe_state("starting...")
         
         # Thanks to https://github.com/pyusb/pyusb/pull/29#issue-21312683
         # Reference the libusb library explicitly to get access to hardware
@@ -188,58 +263,134 @@ class MouseData:
         #Full-path: libusb-1.0.so.0.3.0
         
         if backend is None:
-            print("LibUSB not Found", flush=True)
-
-        #print(usb.core.show_devices())
-        # Find the connected usb device using the Vendor ID and the Product ID
-        dev = ''
-        while True:
-            try:
-                dev = ''
-                dev = usb.core.find(idVendor=0x046d, idProduct=0xc21f, backend=backend)
-            except usb.core.NoBackendError as e:
-                self.full_data.set_string("something wrong with libusb")
-                print("something wrong with libusb", flush=True)
-                return
-
-            if dev:
-                self.controller_connected.set_bool8(True)
-                print("wireless LogiTech F710 controller found", flush=True)
-                break
-
-            print("wireless LogiTech F710 controller not found, looking for wired controller", flush=True)
-            dev = usb.core.find(idVendor=0x046d, idProduct=0xc219, backend=backend)
-
-            if dev:
-                print("wired LogiTech F710 controller found, please change mode to XInput instead of DInput", flush=True)
-                self.controller_connected.set_bool8(True)
-
-            time.sleep(1.5)
-            print("trying again in 5s", flush=True)
-            self.full_data.set_string("wireless LogiTech F710 controller not found")
-            self.controller_connected.set_bool8(False)
-            time.sleep(5.0)       
-
-        # Get the endpoint of the device and make sure to detach the connection to the OS kernel in order to claim it for this process
+            # No backend => cannot access USB hardware
+            self._set_safe_state("libusb backend not found")
+            print_lock("[ERROR] Libusb not found")
+            return
+            
         interface = 0
-        endpoint = dev[0].interfaces()[0].endpoints()[0]
-        dev.reset()
-        if dev.is_kernel_driver_active(interface):
-            dev.detach_kernel_driver(interface)
+        dev = None
+        endpoint = None
+
+        # Initial connect loop (legacy behavior): waits until device is present
+        while dev is None:
+            dev = usb.core.find(idVendor=0x046d, idProduct=0xc21f, backend=backend)
+            if not dev:
+                dev = usb.core.find(idVendor=0x046d, idProduct=0xc219, backend=backend)
+            if not dev:
+                # Device not found -> wait before retry
+                print_lock("[ERROR] Device not found")
+                time.sleep(5)
+
+        # Select the interrupt endpoint used for reading reports
+        try:
+            endpoint = dev[0].interfaces()[0].endpoints()[0]
+        except:
+            print_lock("[ERROR] Endpoint access failed")
+        
+        # Reset device and detach kernel driver if it currently owns the interface
+        try:
+            dev.reset()
+        except:
+            print_lock("[ERROR] Reset failed")
+
+        try:
+            if dev.is_kernel_driver_active(interface):
+                try:
+                    dev.detach_kernel_driver(interface)
+                except:
+                    print_lock("[WARN] Failed to detach kernel driver (initial)")
+        except:
+            print_lock("[ERROR] Kernel driver check failed")
+        # Claim interface so we can read data
+        try:
             usb.util.claim_interface(dev, interface)
+        except:
+            print_lock("[ERROR] USB interface claim failed (initial)")
+
+        # Mark as connected for Data Layer clients
+        self.controller_connected.set_bool8(True)
 
         # Endless loop to read in the data from the usb device more than once
-        while True :
+        while True:
+
+            # -------------------------------------------------
+            # If device handle is None: attempt fast reconnect
+            # -------------------------------------------------
+            if dev is None:
+                dev = usb.core.find(idVendor=0x046d, idProduct=0xc21f, backend=backend)
+                if not dev:
+                    dev = usb.core.find(idVendor=0x046d, idProduct=0xc219, backend=backend)
+
+                if dev is None:
+                    # No device present -> sleep shortly and retry (non-blocking overall)
+                    print_lock("[INFO] USB disconnected")
+                    time.sleep(0.2)
+                    continue
+
+                # Device found again -> reset and re-claim interface
+                try:
+                    dev.reset()
+                except:
+                    print_lock("[WARN] Reset failed")
+                
+                
+                # Rebuild endpoint reference (device object changed)
+                try:
+                    endpoint = dev[0].interfaces()[0].endpoints()[0]
+                except:
+                    # If we cannot access endpoint, go safe and retry
+                    print_lock("[ERROR] Endpoint access failed after reconnect")
+                    self._set_safe_state("endpoint error")
+                    self._cleanup_usb(dev, interface)
+                    dev = None
+                    endpoint = None
+                    time.sleep(0.2)
+                    continue
+                
+                # Detach kernel driver if necessary
+                try:
+                    if dev.is_kernel_driver_active(interface):
+                        try:
+                            dev.detach_kernel_driver(interface)
+                        except:
+                            print_lock("[WARN] Failed to detach kernel driver (reconnect)")
+                except:
+                    print_lock("[WARN] is_kernel_driver_active check failed (reconnect)")
+
+                
+                # Claim interface again
+                try:
+                    usb.util.claim_interface(dev, interface)
+                except:
+                    print_lock("[ERROR] USB claim failed after reconnect")
+                    self._set_safe_state("claim error")
+                    self._cleanup_usb(dev, interface)
+                    dev = None
+                    endpoint = None
+                    time.sleep(0.2)
+                    continue
+
+                # Reconnected
+                self.controller_connected.set_bool8(True)
+                #self.full_data.set_string("connected")
+                continue
             try:
-                # print("start reading", flush=True)
+                # Read one report from the USB interrupt endpoint (timeout in ms)
                 data = dev.read(endpoint.bEndpointAddress,endpoint.wMaxPacketSize, 500)
-                self.full_data.set_string(str(data))
-                print(str(data), flush=True)
+
+                # Store raw data for debugging / visualization
+                #self.full_data.set_string(str(data))
+                
 
                 # Decoding of the mouse data array is specific to the mouse you use
                 # To decode it yourself, just look at the data array and how the data changes if you e.g., move the mouse or press a button
                 #Unable to use Case or match structure, due to older version of Python
                 
+
+                # -------------------------------------------------
+                # Reset all button states before decoding current report
+                # -------------------------------------------------
                 self.left_button.set_bool8(False)
                 self.right_button.set_bool8(False)
                 self.right_button_bottom.set_bool8(False)
@@ -253,6 +404,9 @@ class MouseData:
                 self.left_cross_button.set_bool8(False)
                 self.right_cross_button.set_bool8(False)
 
+                # -------------------------------------------------
+                # Decode button bits (device-specific mapping)
+                # -------------------------------------------------
                 clicked_button = int(data[3])
                 if(clicked_button & 1):
                     self.left_button.set_bool8(True) 
@@ -271,6 +425,7 @@ class MouseData:
                 if (int(data[5]) & 29):
                     self.right_button_bottom.set_bool8(True)
 
+                # D-pad (cross) bits
                 clicked_cross_button = int(data[2])
                 if (clicked_cross_button & 1):
                     self.up_cross_button.set_bool8(True)
@@ -281,6 +436,9 @@ class MouseData:
                 if (clicked_cross_button & 8):
                     self.right_cross_button.set_bool8(True)
 
+                # -------------------------------------------------
+                # Decode joysticks (scaled values, device-specific indices)
+                # -------------------------------------------------
                 l_joystick_x_scaled = (int(data[6])/128)-1
                 #l_joystick_x_scaled = int(data[6])
                 self.l_joystick_x.set_float32(float(l_joystick_x_scaled))
@@ -298,12 +456,42 @@ class MouseData:
                 self.r_joystick_y.set_float32(float(r_joystick_y_scaled))
 
 
+
             except usb.core.USBError as e:
-                # print("no data read", flush=True)
-                self.full_data.set_string("no data read")
-                data = None
-                if e.args == ('Operation timed out',):
+
+                # Normal timeout: no report received within timeout; keep looping
+                if e.errno == 110:  # ETIMEDOUT
                     continue
+
+                # Disconnect or I/O error: go safe, cleanup, and trigger reconnect logic
+                if e.errno in (19, 5):  # ENODEV, EIO
+                    print_lock("[WARN] USB disconnected")
+                    self._set_safe_state("disconnected")
+                    self._cleanup_usb(dev, interface)
+                    dev = None
+                    endpoint = None
+                    time.sleep(0.2)
+                    continue
+
+                # Any other USBError: keep process alive, go safe and retry
+                print_lock("[ERROR] USB Error")
+                self._set_safe_state("usb error")
+                self._cleanup_usb(dev, interface)
+                dev = None
+                endpoint = None
+                time.sleep(0.2)
+                continue
+
+            
+            except Exception as ex:
+                # Catch-all to prevent the provider process from crashing
+                print_lock("[ERROR] Unexpected exception")
+                self._set_safe_state("usb error process crashed")
+                self._cleanup_usb(dev, interface)
+                dev = None
+                endpoint = None
+                time.sleep(0.2)
+                continue
 
     def register_nodes(self):
         
@@ -344,7 +532,7 @@ class MouseData:
         self.provider.register_node(
             self.addressRoot + "Right-Joystick-Y", self.providerNode)
 
-        print("INFO: MouseData Provider Nodes registered", flush=True)
+        #print("INFO: MouseData Provider Nodes registered", flush=True)
 
     def create_metadata(self, typeAddress: str, unit: str, description: str, allowWrite : bool):
 
