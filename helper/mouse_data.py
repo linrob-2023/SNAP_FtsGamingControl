@@ -42,13 +42,34 @@ import usb.util
 import usb.backend.libusb1
 
 # ==========================================================
-# COOLDOWN PRINT (ONLY FOR ERRORS/WARNS)
+# LOGGING (thread-safe)
 # ==========================================================
-_print_lock = Lock()
+# Console only
+# Python logging is thread-safe; we only format and route messages to console.
 
-def print_lock(msg: str):
-    with _print_lock:
-        print(msg, flush=True)
+import logging
+
+logger = logging.getLogger("joystick_provider")
+logger.setLevel(logging.DEBUG)  # Global logger level
+
+if not logger.handlers:
+    # Console log format includes:
+    # - timestamp
+    # - log level
+    # - process id
+    # - thread name (important for multi-thread debugging)
+    # - module name + line number
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-8s | pid=%(process)d | %(threadName)s | %(module)s:%(lineno)d | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    ch = logging.StreamHandler()     # Console output
+    ch.setLevel(logging.INFO)        # Change to DEBUG if you want to see everything
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+
 
 type_address_string = "types/datalayer/string"
 type_address_bool8 = "types/datalayer/bool8"
@@ -237,11 +258,11 @@ class MouseData:
         try:
             usb.util.release_interface(dev, interface)
         except:
-            print_lock("[ERROR] Endpoint access failed")
+            logger.debug("release_interface failed", exc_info=True)
         try:
             usb.util.dispose_resources(dev)
         except:
-            print_lock("[ERROR] Resource failed")
+            logger.debug("dispose_resources failed", exc_info=True)
     # Thanks to https://www.orangecoat.com/how-to/read-and-decode-data-from-your-mouse-using-this-pyusb-hack
     def start_reading(self):
 
@@ -265,7 +286,7 @@ class MouseData:
         if backend is None:
             # No backend => cannot access USB hardware
             self._set_safe_state("libusb backend not found")
-            print_lock("[ERROR] Libusb not found")
+            logger.error("libusb backend not found")
             return
             
         interface = 0
@@ -279,34 +300,34 @@ class MouseData:
                 dev = usb.core.find(idVendor=0x046d, idProduct=0xc219, backend=backend)
             if not dev:
                 # Device not found -> wait before retry
-                print_lock("[ERROR] Device not found")
+                logger.error("Device not found")
                 time.sleep(5)
 
         # Select the interrupt endpoint used for reading reports
         try:
             endpoint = dev[0].interfaces()[0].endpoints()[0]
-        except:
-            print_lock("[ERROR] Endpoint access failed")
+        except Exception:
+            logger.error("USB initialization failed", exc_info=True)
         
         # Reset device and detach kernel driver if it currently owns the interface
         try:
             dev.reset()
         except:
-            print_lock("[ERROR] Reset failed")
+            logger.error("Reset failed")
 
         try:
             if dev.is_kernel_driver_active(interface):
                 try:
                     dev.detach_kernel_driver(interface)
                 except:
-                    print_lock("[WARN] Failed to detach kernel driver (initial)")
+                    logger.warning("Failed to detach kernel driver (initial)")
         except:
-            print_lock("[ERROR] Kernel driver check failed")
+            logger.error("Kernel driver check failed")
         # Claim interface so we can read data
         try:
             usb.util.claim_interface(dev, interface)
         except:
-            print_lock("[ERROR] USB interface claim failed (initial)")
+            logger.error("USB interface claim failed (initial)")
 
         # Mark as connected for Data Layer clients
         self.controller_connected.set_bool8(True)
@@ -324,7 +345,7 @@ class MouseData:
 
                 if dev is None:
                     # No device present -> sleep shortly and retry (non-blocking overall)
-                    print_lock("[INFO] USB disconnected")
+                    logger.info("USB disconnected")
                     time.sleep(0.2)
                     continue
 
@@ -332,7 +353,7 @@ class MouseData:
                 try:
                     dev.reset()
                 except:
-                    print_lock("[WARN] Reset failed")
+                    logger.warning("Reset failed")
                 
                 
                 # Rebuild endpoint reference (device object changed)
@@ -340,7 +361,7 @@ class MouseData:
                     endpoint = dev[0].interfaces()[0].endpoints()[0]
                 except:
                     # If we cannot access endpoint, go safe and retry
-                    print_lock("[ERROR] Endpoint access failed after reconnect")
+                    logger.error("Endpoint access failed after reconnect")
                     self._set_safe_state("endpoint error")
                     self._cleanup_usb(dev, interface)
                     dev = None
@@ -354,16 +375,16 @@ class MouseData:
                         try:
                             dev.detach_kernel_driver(interface)
                         except:
-                            print_lock("[WARN] Failed to detach kernel driver (reconnect)")
+                            logger.warning("Failed to detach kernel driver (reconnect)")
                 except:
-                    print_lock("[WARN] is_kernel_driver_active check failed (reconnect)")
+                    logger.warning("is_kernel_driver_active check failed (reconnect)")
 
                 
                 # Claim interface again
                 try:
                     usb.util.claim_interface(dev, interface)
                 except:
-                    print_lock("[ERROR] USB claim failed after reconnect")
+                    logger.error("USB claim failed after reconnect")
                     self._set_safe_state("claim error")
                     self._cleanup_usb(dev, interface)
                     dev = None
@@ -465,7 +486,7 @@ class MouseData:
 
                 # Disconnect or I/O error: go safe, cleanup, and trigger reconnect logic
                 if e.errno in (19, 5):  # ENODEV, EIO
-                    print_lock("[WARN] USB disconnected")
+                    logger.warning("USB disconnected")
                     self._set_safe_state("disconnected")
                     self._cleanup_usb(dev, interface)
                     dev = None
@@ -474,7 +495,7 @@ class MouseData:
                     continue
 
                 # Any other USBError: keep process alive, go safe and retry
-                print_lock("[ERROR] USB Error")
+                logger.error("USB Error")
                 self._set_safe_state("usb error")
                 self._cleanup_usb(dev, interface)
                 dev = None
@@ -483,9 +504,9 @@ class MouseData:
                 continue
 
             
-            except Exception as ex:
+            except Exception:
                 # Catch-all to prevent the provider process from crashing
-                print_lock("[ERROR] Unexpected exception")
+                logger.error("Unexpected exception", exc_info=True)
                 self._set_safe_state("usb error process crashed")
                 self._cleanup_usb(dev, interface)
                 dev = None
