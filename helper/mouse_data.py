@@ -60,8 +60,7 @@ if not logger.handlers:
     # - thread name (important for multi-thread debugging)
     # - module name + line number
     formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)-8s | pid=%(process)d | %(threadName)s | %(module)s:%(lineno)d | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+        fmt="%(asctime)s | %(levelname)-8s | pid=%(process)d | %(threadName)s | %(module)s:%(lineno)d | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
 
     ch = logging.StreamHandler()     # Console output
@@ -224,7 +223,7 @@ class MouseData:
         if self._reader_thread is None or not self._reader_thread.is_alive():
             self._reader_thread = threading.Thread(target=self.start_reading, daemon=True)
             self._reader_thread.start()
-    def _set_safe_state(self, msg: str = "disconnected"):
+    def _set_safe_state(self):
 
         #Put all exposed Data Layer values into a defined safe state.
         #This is used on startup and on USB disconnect/errors.
@@ -274,7 +273,8 @@ class MouseData:
         #####################################
 
         # Initialize to a known safe state
-        self._set_safe_state("starting...")
+        self._set_safe_state()
+        logger.info("USB reader thread started")
         
         # Thanks to https://github.com/pyusb/pyusb/pull/29#issue-21312683
         # Reference the libusb library explicitly to get access to hardware
@@ -285,7 +285,7 @@ class MouseData:
         
         if backend is None:
             # No backend => cannot access USB hardware
-            self._set_safe_state("libusb backend not found")
+            self._set_safe_state()
             logger.error("libusb backend not found")
             return
             
@@ -362,7 +362,7 @@ class MouseData:
                 except:
                     # If we cannot access endpoint, go safe and retry
                     logger.error("Endpoint access failed after reconnect")
-                    self._set_safe_state("endpoint error")
+                    self._set_safe_state()
                     self._cleanup_usb(dev, interface)
                     dev = None
                     endpoint = None
@@ -385,7 +385,7 @@ class MouseData:
                     usb.util.claim_interface(dev, interface)
                 except:
                     logger.error("USB claim failed after reconnect")
-                    self._set_safe_state("claim error")
+                    self._set_safe_state()
                     self._cleanup_usb(dev, interface)
                     dev = None
                     endpoint = None
@@ -487,7 +487,7 @@ class MouseData:
                 # Disconnect or I/O error: go safe, cleanup, and trigger reconnect logic
                 if e.errno in (19, 5):  # ENODEV, EIO
                     logger.warning("USB disconnected")
-                    self._set_safe_state("disconnected")
+                    self._set_safe_state()
                     self._cleanup_usb(dev, interface)
                     dev = None
                     endpoint = None
@@ -496,7 +496,7 @@ class MouseData:
 
                 # Any other USBError: keep process alive, go safe and retry
                 logger.error("USB Error")
-                self._set_safe_state("usb error")
+                self._set_safe_state()
                 self._cleanup_usb(dev, interface)
                 dev = None
                 endpoint = None
@@ -507,7 +507,7 @@ class MouseData:
             except Exception:
                 # Catch-all to prevent the provider process from crashing
                 logger.error("Unexpected exception", exc_info=True)
-                self._set_safe_state("usb error process crashed")
+                self._set_safe_state()
                 self._cleanup_usb(dev, interface)
                 dev = None
                 endpoint = None
