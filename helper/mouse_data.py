@@ -221,7 +221,7 @@ class MouseData:
     def start_reading_threaded(self):
          #Start the USB reading loop in a dedicated daemon thread (non-blocking for Data Layer)
         if self._reader_thread is None or not self._reader_thread.is_alive():
-            self._reader_thread = threading.Thread(target=self.start_reading, daemon=True)
+            self._reader_thread = threading.Thread(target=self.start_reading, daemon=True, name ="USB-Reader")
             self._reader_thread.start()
     def _set_safe_state(self):
 
