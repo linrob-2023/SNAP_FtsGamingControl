@@ -90,6 +90,7 @@ class MouseData:
         # Prevent spamming "Device not found" during the initial wait loop
         self._device_not_found = False
         # Force-feedback (rumble) runtime objects
+        self._ff_dev = None
         self._ff_effect_id = None
         # -----------------------------
         # Data Layer variables (Variants)
@@ -756,7 +757,9 @@ class MouseData:
         if address.endswith("full-data"):
             cb(Result.OK, self.full_data)
             return
-
+        if address.endswith("rumble-enable"):
+            cb(Result.OK, self.rumble_enable)
+            return
         if address.endswith("left-button"):
             cb(Result.OK, self.left_button)
             return
