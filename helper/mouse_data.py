@@ -23,9 +23,7 @@
 # This script was adapted from the sample projects in SDK V1.12.0 - RM21.11
 
 import time
-import typing
 import threading
-from threading import Lock
 
 import flatbuffers
 from comm.datalayer import Metadata, NodeClass, AllowedOperations, Reference
@@ -91,6 +89,8 @@ class MouseData:
         self._usb_connected = False 
         # Prevent spamming "Device not found" during the initial wait loop
         self._device_not_found = False
+        # Force-feedback (rumble) runtime objects
+        self._ff_effect_id = None
         # -----------------------------
         # Data Layer variables (Variants)
         # -----------------------------
@@ -108,6 +108,13 @@ class MouseData:
         data = self.create_metadata(type_address_string, "", "Full controller data", False)
         self.full_data_metadata = Variant()
         self.full_data_metadata.set_flatbuffers(data)
+
+        # Rumble enable/disable (writeable boolean)
+        self.rumble_enable = Variant()
+        self.rumble_enable.set_bool8(False)
+        data = self.create_metadata(type_address_bool8, "", "Enable/disable joystick rumble", True)  # allowWrite=True
+        self.rumble_enable_metadata = Variant()
+        self.rumble_enable_metadata.set_flatbuffers(data)
 
         # Buttons / triggers (boolean flags)
         self.left_button = Variant()
@@ -266,6 +273,93 @@ class MouseData:
             usb.util.dispose_resources(dev)
         except:
             logger.debug("dispose_resources failed", exc_info=True)
+    # -----------------------------
+    # RUMBLE (Force Feedback) helpers
+    # -----------------------------
+    def _try_import_evdev(self):
+        #
+        #Import evdev lazily so the provider does NOT crash if evdev isn't installed.
+        #Returns (InputDevice, ecodes, ff, list_devices) or (None, None, None, None).
+        #
+        try:
+            from evdev import InputDevice, ecodes, ff, list_devices  # type: ignore
+            return InputDevice, ecodes, ff, list_devices
+        except Exception:
+            return None, None, None, None
+    def _find_ff_device(self):
+        #
+        #Find an input event device that supports force-feedback (EV_FF).
+        #On Linux, rumble devices appear as /dev/input/eventX.
+        #
+        InputDevice, ecodes, ff, list_devices = self._try_import_evdev()
+        if InputDevice is None:
+            logger.warning("evdev is not available; rumble control disabled (install python-evdev)")
+            return None
+
+        for path in list_devices():
+            try:
+                dev = InputDevice(path)
+                caps = dev.capabilities()
+                if ecodes.EV_FF in caps:
+                    return dev
+            except Exception:
+                # Ignore unreadable devices
+                continue
+        return None
+    def _apply_rumble(self, enable: bool):
+        #
+        #Turn joystick rumble on/off using Linux evdev force-feedback.
+        #Best-effort: logs and returns if FF is not available.
+        #
+        InputDevice, ecodes, ff, list_devices = self._try_import_evdev()
+        if InputDevice is None:
+            # Already logged in _find_ff_device() if called; keep quiet here.
+            return
+
+        # Lazy-open FF device on first use
+        if self._ff_dev is None:
+            self._ff_dev = self._find_ff_device()
+            if self._ff_dev is None:
+                logger.warning("No force-feedback device found (EV_FF not available or permission denied)")
+                return
+            logger.info("Force-feedback device: %s (%s)", self._ff_dev.name, self._ff_dev.path)
+
+        if enable:
+            # Upload and play one rumble effect (2 seconds)
+            rumble = ff.Rumble(strong_magnitude=0x6000, weak_magnitude=0x4000)
+            effect = ff.Effect(
+                ecodes.FF_RUMBLE,
+                -1,  # id=-1 => create a new effect
+                0,
+                ff.Trigger(0, 0),
+                ff.Replay(length=2000, delay=0),
+                rumble,
+            )
+
+            try:
+                self._ff_effect_id = self._ff_dev.upload_effect(effect)
+                self._ff_dev.write(ecodes.EV_FF, self._ff_effect_id, 1)
+                logger.info("Rumble ON (effect id=%s)", self._ff_effect_id)
+            except Exception:
+                logger.error("Failed to start rumble", exc_info=True)
+
+        else:
+            # Stop and erase effect if possible
+            if self._ff_effect_id is None:
+                return
+            try:
+                self._ff_dev.write(ecodes.EV_FF, self._ff_effect_id, 0)
+                try:
+                    self._ff_dev.erase_effect(self._ff_effect_id)
+                except Exception:
+                    # Some drivers don't support erase cleanly; ignore.
+                    pass
+                logger.info("Rumble OFF (effect id=%s)", self._ff_effect_id)
+            except Exception:
+                logger.error("Failed to stop rumble", exc_info=True)
+            finally:
+                self._ff_effect_id = None
+
     # Thanks to https://www.orangecoat.com/how-to/read-and-decode-data-from-your-mouse-using-this-pyusb-hack
     def start_reading(self):
 
@@ -569,7 +663,8 @@ class MouseData:
             self.addressRoot + "Right-Joystick-X", self.providerNode)
         self.provider.register_node(
             self.addressRoot + "Right-Joystick-Y", self.providerNode)
-
+        self.provider.register_node(
+            self.addressRoot + "rumble-enable", self.providerNode)
         #print("INFO: MouseData Provider Nodes registered", flush=True)
 
     def create_metadata(self, typeAddress: str, unit: str, description: str, allowWrite : bool):
@@ -715,9 +810,23 @@ class MouseData:
 
     def __on_write(self, userdata: ctrlxdatalayer.clib.userData_c_void_p, address: str, data: Variant, cb: NodeCallback):
 
-        if data.get_type() != VariantType.STRING:
-            cb(Result.TYPE_MISMATCH, None)
+        if address.endswith("rumble-enable"):
+            if data.get_type() != VariantType.BOOL8:
+                cb(Result.TYPE_MISMATCH, None)
+                return
+
+            enable = data.get_bool8()
+            self.rumble_enable.set_bool8(enable)
+
+            # Apply rumble on hardware (best-effort, do not crash provider)
+            try:
+                self._apply_rumble(enable)
+            except Exception:
+                logger.error("Failed to apply rumble", exc_info=True)
+
+            cb(Result.OK, None)
             return
+        
 
         cb(Result.INVALID_ADDRESS, None)
 
@@ -729,6 +838,10 @@ class MouseData:
 
         if address.endswith("full-data"):
             cb(Result.OK, self.full_data_metadata)
+            return
+        
+        if address.endswith("rumble-enable"):
+            cb(Result.OK, self.rumble_enable_metadata)
             return
 
         if address.endswith("left-button"):
