@@ -67,6 +67,7 @@ if not logger.handlers:
     ch.setLevel(logging.INFO)        # Change to DEBUG if you want to see everything
     ch.setFormatter(formatter)
     logger.addHandler(ch)
+    
 
 
 
@@ -86,7 +87,10 @@ class MouseData:
         self.addressRoot = addressRoot + "/"
         # Reader thread handle (USB read loop runs here to avoid blocking Data Layer callbacks)
         self._reader_thread = None
-
+        #To log if USB connected/disconnected. At start is USB not connected for system
+        self._usb_connected = False 
+        # Prevent spamming "Device not found" during the initial wait loop
+        self._device_not_found = False
         # -----------------------------
         # Data Layer variables (Variants)
         # -----------------------------
@@ -286,7 +290,7 @@ class MouseData:
         if backend is None:
             # No backend => cannot access USB hardware
             self._set_safe_state()
-            logger.error("libusb backend not found")
+            logger.critical("libusb backend not found - USB access impossible")
             return
             
         interface = 0
@@ -300,8 +304,14 @@ class MouseData:
                 dev = usb.core.find(idVendor=0x046d, idProduct=0xc219, backend=backend)
             if not dev:
                 # Device not found -> wait before retry
-                logger.error("Device not found")
+                if not self._device_not_found:
+                    logger.warning("Device not found. Retrying in 5 seconds...")
+                    self._device_not_found = True
                 time.sleep(5)
+                continue
+            if self._device_not_found:
+                logger.info("Joystick found")
+                self._device_not_found = False
 
         # Select the interrupt endpoint used for reading reports
         try:
@@ -331,7 +341,9 @@ class MouseData:
 
         # Mark as connected for Data Layer clients
         self.controller_connected.set_bool8(True)
-
+        if not self._usb_connected:
+            logger.info("Joystick connected")
+            self._usb_connected = True
         # Endless loop to read in the data from the usb device more than once
         while True:
 
@@ -344,8 +356,9 @@ class MouseData:
                     dev = usb.core.find(idVendor=0x046d, idProduct=0xc219, backend=backend)
 
                 if dev is None:
-                    # No device present -> sleep shortly and retry (non-blocking overall)
-                    logger.info("USB disconnected")
+                    if self._usb_connected:
+                        logger.warning("USB disconnected")
+                        self._usb_connected = False
                     time.sleep(0.2)
                     continue
 
@@ -394,7 +407,9 @@ class MouseData:
 
                 # Reconnected
                 self.controller_connected.set_bool8(True)
-                #self.full_data.set_string("connected")
+                if not self._usb_connected:
+                    logger.info("Joystick reconnected")
+                    self._usb_connected = True
                 continue
             try:
                 # Read one report from the USB interrupt endpoint (timeout in ms)
@@ -486,7 +501,9 @@ class MouseData:
 
                 # Disconnect or I/O error: go safe, cleanup, and trigger reconnect logic
                 if e.errno in (19, 5):  # ENODEV, EIO
-                    logger.warning("USB disconnected")
+                    if self._usb_connected:
+                        logger.warning("USB disconnected")
+                        self._usb_connected = False
                     self._set_safe_state()
                     self._cleanup_usb(dev, interface)
                     dev = None
