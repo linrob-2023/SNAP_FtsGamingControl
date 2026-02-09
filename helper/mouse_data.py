@@ -416,7 +416,7 @@ class MouseData:
                 data = dev.read(endpoint.bEndpointAddress,endpoint.wMaxPacketSize, 500)
 
                 # Store raw data for debugging / visualization
-                #self.full_data.set_string(str(data))
+                self.full_data.set_string(str(data))
                 
 
                 # Decoding of the mouse data array is specific to the mouse you use
