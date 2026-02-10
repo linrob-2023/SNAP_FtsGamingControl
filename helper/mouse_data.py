@@ -122,18 +122,6 @@ class MouseData:
         self.right_button_metadata = Variant()
         self.right_button_metadata.set_flatbuffers(data)
 
-        self.left_button_bottom = Variant()
-        self.left_button_bottom.set_bool8(False)
-        data = self.create_metadata(type_address_bool8, "", "Left trigger LT pressed down", False)
-        self.left_button_bottom_metadata = Variant()
-        self.left_button_bottom_metadata.set_flatbuffers(data)
-
-        self.right_button_bottom = Variant()
-        self.right_button_bottom.set_bool8(False)
-        data = self.create_metadata(type_address_bool8, "", "Right trigger RT pressed down", False)
-        self.right_button_bottom_metadata = Variant()
-        self.right_button_bottom_metadata.set_flatbuffers(data)
-
         self.b_button = Variant()
         self.b_button.set_bool8(False)
         data = self.create_metadata(type_address_bool8, "", "B button pressed down", False)
@@ -207,6 +195,18 @@ class MouseData:
         self.r_joystick_y_metadata = Variant()
         self.r_joystick_y_metadata.set_flatbuffers(data)
 
+        self.left_button_bottom = Variant()
+        self.left_button_bottom.set_float32(0)
+        data = self.create_metadata(type_address_float, "", "Left trigger LT pressed down", False)
+        self.left_button_bottom_metadata = Variant()
+        self.left_button_bottom_metadata.set_flatbuffers(data)
+
+        self.right_button_bottom = Variant()
+        self.right_button_bottom.set_float32(0)
+        data = self.create_metadata(type_address_float, "", "Right trigger RT pressed down", False)
+        self.right_button_bottom_metadata = Variant()
+        self.right_button_bottom_metadata.set_flatbuffers(data)
+
         # -----------------------------
         # Provider node callbacks
         # -----------------------------
@@ -238,8 +238,7 @@ class MouseData:
         # Reset all buttons
         self.left_button.set_bool8(False)
         self.right_button.set_bool8(False)
-        self.left_button_bottom.set_bool8(False)
-        self.right_button_bottom.set_bool8(False)
+        
 
         self.a_button.set_bool8(False)
         self.b_button.set_bool8(False)
@@ -256,6 +255,9 @@ class MouseData:
         self.l_joystick_y.set_float32(0.0)
         self.r_joystick_x.set_float32(0.0)
         self.r_joystick_y.set_float32(0.0)
+        self.left_button_bottom.set_float32(0.0)
+        self.right_button_bottom.set_float32(0.0)
+
     def _cleanup_usb(self, dev, interface):
         #Release USB interface and dispose resources safely (ignore errors).
         try:
@@ -416,7 +418,7 @@ class MouseData:
                 data = dev.read(endpoint.bEndpointAddress,endpoint.wMaxPacketSize, 500)
 
                 # Store raw data for debugging / visualization
-                #self.full_data.set_string(str(data))
+                self.full_data.set_string(str(data))
                 
 
                 # Decoding of the mouse data array is specific to the mouse you use
@@ -429,8 +431,6 @@ class MouseData:
                 # -------------------------------------------------
                 self.left_button.set_bool8(False)
                 self.right_button.set_bool8(False)
-                self.right_button_bottom.set_bool8(False)
-                self.left_button_bottom.set_bool8(False)
                 self.b_button.set_bool8(False)
                 self.y_button.set_bool8(False)
                 self.x_button.set_bool8(False)
@@ -456,10 +456,7 @@ class MouseData:
                     self.x_button.set_bool8(True)
                 if(clicked_button & 16):
                     self.a_button.set_bool8(True)
-                if (int(data[4]) & 31):
-                    self.left_button_bottom.set_bool8(True)
-                if (int(data[5]) & 29):
-                    self.right_button_bottom.set_bool8(True)
+                
 
                 # D-pad (cross) bits
                 clicked_cross_button = int(data[2])
@@ -490,6 +487,12 @@ class MouseData:
                 r_joystick_y_scaled = (int(data[12])/128)-1 #Check Array Index for B Button
                 #l_joystick_y_scaled = int(data[8])
                 self.r_joystick_y.set_float32(float(r_joystick_y_scaled))
+
+                l_button_bottom_scaled = (int(data[4])/255)
+                self.left_button_bottom.set_float32(float(l_button_bottom_scaled))
+                
+                r_button_bottom_scaled = (int(data[5])/255)
+                self.right_button_bottom.set_float32(float(r_button_bottom_scaled))
 
 
 
